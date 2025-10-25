@@ -1,0 +1,5 @@
+{
+  "name": "Deckard",
+  "description": "A web application that simulates managing a fleet of Android TV and Chromecast devices. Scan the network (simulated), view all screens in a matrix, and issue group commands or mass-install APKs using natural language powered by the Gemini API.",
+  "requestFramePermissions": []
+}
