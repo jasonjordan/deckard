@@ -193,6 +193,7 @@ export class AdbService {
             }
         };
 
+        // Timeout to prevent the promise from hanging indefinitely
         setTimeout(() => {
             if (!resolved) {
                 pc.onicecandidate = null;
@@ -204,48 +205,56 @@ export class AdbService {
   }
 
   // --- Network Scan ---
-  public async scanNetwork(start = 1, end = 254, batchSize = 10) {
+  public async scanNetwork() {
     if (this.isScanning) return;
     this.isScanning = true;
     
     this.emit('scan-progress', { currentIp: 'Detecting local network...', progress: 0, found: this.devices.length });
-    const subnet = await this.getLocalSubnet();
+    const detectedSubnet = await this.getLocalSubnet();
 
-    if (!subnet) {
-        this.isScanning = false;
-        this.emit('error', new Error("Could not determine local network. Please add devices manually by IP."));
-        this.emit('scan-complete');
-        return;
+    const subnetsToScan: string[] = [];
+    if (detectedSubnet) {
+        subnetsToScan.push(detectedSubnet);
+        this.emit('scan-progress', { currentIp: `Scanning your local subnet (${detectedSubnet}.x)...`, progress: 0, found: this.devices.length });
+    } else {
+        const commonSubnets = ['192.168.1', '192.168.0', '10.0.0'];
+        subnetsToScan.push(...commonSubnets);
+        this.emit('scan-progress', { currentIp: 'Could not detect local subnet. Scanning common ranges...', progress: 0, found: this.devices.length });
     }
 
-    const totalIpsToScan = (end - start + 1);
+    const start = 1;
+    const end = 254;
+    const batchSize = 20;
+    const totalIpsToScan = subnetsToScan.length * (end - start + 1);
     let ipsScanned = 0;
-    
-    this.emit('scan-progress', { currentIp: `Scanning ${subnet}.*`, progress: 0, found: this.devices.length });
 
-    for (let i = start; i <= end; i += batchSize) {
+    for (const subnet of subnetsToScan) {
         if (!this.isScanning) break;
 
-        const batchEnd = Math.min(i + batchSize - 1, end);
-        const batchPromises = [];
+        for (let i = start; i <= end; i += batchSize) {
+            if (!this.isScanning) break;
 
-        for (let j = i; j <= batchEnd; j++) {
-            const ip = `${subnet}.${j}`;
-            if (!this.devices.some(d => d.ipAddress === ip)) {
-                batchPromises.push(this.adb.connect(ip).catch(() => {}));
+            const batchEnd = Math.min(i + batchSize - 1, end);
+            const batchPromises = [];
+
+            for (let j = i; j <= batchEnd; j++) {
+                const ip = `${subnet}.${j}`;
+                if (!this.devices.some(d => d.ipAddress === ip)) {
+                    batchPromises.push(this.adb.connect(ip).catch(() => { /* Ignore connection errors during scan */ }));
+                }
             }
+            
+            await Promise.allSettled(batchPromises);
+            
+            ipsScanned += (batchEnd - i + 1);
+            
+            const progress: ScanProgress = {
+                currentIp: `${subnet}.${batchEnd}`,
+                progress: Math.round((ipsScanned / totalIpsToScan) * 100),
+                found: this.devices.length,
+            };
+            this.emit('scan-progress', progress);
         }
-        
-        await Promise.allSettled(batchPromises);
-        
-        ipsScanned += (batchEnd - i + 1);
-        
-        const progress: ScanProgress = {
-            currentIp: `${subnet}.${batchEnd}`,
-            progress: Math.round((ipsScanned / totalIpsToScan) * 100),
-            found: this.devices.length,
-        };
-        this.emit('scan-progress', progress);
     }
 
     this.isScanning = false;

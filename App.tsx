@@ -19,24 +19,31 @@ const App: React.FC = () => {
   const [isScanModalOpen, setIsScanModalOpen] = useState(false);
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
   const [deviceInfoContent, setDeviceInfoContent] = useState('');
+  const [isInitialScanRunning, setIsInitialScanRunning] = useState(false);
   
   const adbService = useRef<AdbService | null>(null);
   const [isAdbInitialized, setIsAdbInitialized] = useState(false);
 
   const isFleetLoading = devices.some(d => d.isLoading);
+  
+  const scanCompleteHandler = useCallback(() => {
+    setScanProgress(null);
+    setIsInitialScanRunning(false);
+  }, []);
+
+  const scanProgressHandler = useCallback((progress: ScanProgress) => {
+    setScanProgress(progress);
+  }, []);
+
+  const errorHandler = useCallback((err: Error) => {
+      const errorMessage = err.message.includes("Failed to fetch") ? "Connection failed. Ensure the device is online and network ADB is enabled." : err.message;
+      setError(errorMessage);
+      setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${errorMessage}` }]);
+  }, []);
+
 
   // Effect to initialize the ADB service once the TangoADB script has loaded.
   useEffect(() => {
-    const errorHandler = (err: Error) => {
-        const errorMessage = err.message.includes("Failed to fetch") ? "Connection failed. Ensure the device is online and network ADB is enabled." : err.message;
-        setError(errorMessage);
-        setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${errorMessage}` }]);
-    };
-    
-    const scanProgressHandler = (progress: ScanProgress) => setScanProgress(progress);
-    const scanCompleteHandler = () => setScanProgress(null);
-
-
     const initAdbService = () => {
       if (window.Tango?.Adb) {
         const service = new AdbService();
@@ -67,7 +74,16 @@ const App: React.FC = () => {
         adbService.current.disconnectAll();
       }
     };
-  }, []); // Run only once on component mount
+  }, [errorHandler, scanProgressHandler, scanCompleteHandler]);
+
+
+  // Effect to automatically scan the network on load
+  useEffect(() => {
+    if (isAdbInitialized && adbService.current) {
+      setIsInitialScanRunning(true);
+      adbService.current.scanNetwork();
+    }
+  }, [isAdbInitialized]);
 
 
   // Effect to generate initial screens for newly connected devices
@@ -133,12 +149,10 @@ const App: React.FC = () => {
   
   const handleScanNetwork = useCallback(async () => {
     if (!adbService.current) return;
-    // Ensure modal is open if called from header, but don't re-open if scan is starting from inside modal
-    if (!isScanModalOpen) {
-      setIsScanModalOpen(true);
-    }
+    setIsScanModalOpen(true);
+    // The service has a guard, so it won't start a new scan if one is already running.
     await adbService.current.scanNetwork();
-  }, [isScanModalOpen]);
+  }, []);
 
   const handleEndSession = useCallback(() => {
     if (!adbService.current) return;
@@ -373,16 +387,24 @@ const App: React.FC = () => {
       <Header 
         deviceCount={devices.filter(d => d.state === 'device').length}
         onAddDevice={() => setIsAddDeviceModalOpen(true)}
-        onScanNetwork={() => setIsScanModalOpen(true)}
+        onScanNetwork={handleScanNetwork}
         onEndSession={handleEndSession}
       />
       <main className="flex-grow flex p-4 gap-4 overflow-hidden">
         <div className="flex-grow grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-6 p-4 overflow-y-auto rounded-2xl bg-slate-900/50 border border-slate-700/50">
-          {devices.length === 0 && !isScanModalOpen && (
+          {devices.length === 0 && isInitialScanRunning && (
+            <div className="col-span-full flex flex-col items-center justify-center text-center text-slate-500 h-full">
+              <div className="w-16 h-16 mx-auto border-4 border-t-indigo-500 border-gray-600 rounded-full animate-spin"></div>
+              <h2 className="text-2xl font-bold text-slate-300 mt-4">Scanning for Devices...</h2>
+              <p className="mt-2">Deckard is automatically scanning your local network.</p>
+              <p className="text-xs mt-1">(You can see detailed progress by clicking "Scan Network")</p>
+            </div>
+          )}
+          {devices.length === 0 && !isInitialScanRunning && !isScanModalOpen && (
             <div className="col-span-full flex flex-col items-center justify-center text-center text-slate-500 h-full">
               <ComputerDesktopIcon className="w-20 h-20 mb-4" />
-              <h2 className="text-2xl font-bold text-slate-300">No Devices Connected</h2>
-              <p className="mt-2">Use "Scan Network" to automatically find devices, or "Add Device" to connect via IP address.</p>
+              <h2 className="text-2xl font-bold text-slate-300">No Devices Found</h2>
+              <p className="mt-2">Use "Scan Network" to search again, or "Add Device" to connect via IP address.</p>
             </div>
           )}
           {devices.map(device => (
