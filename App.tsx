@@ -289,7 +289,7 @@ const App: React.FC = () => {
      }
   }, [devices]);
 
-  const runAdbCommandOnFleet = useCallback(async (command: string, args?: { appName?: string, packageName?: string }) => {
+  const runAdbCommandOnFleet = useCallback(async (command: string, args?: { appName?: string, packageName?: string, packageNameOrPath?: string }) => {
       if (!adbService.current) return;
       const onlineDevices = adbService.current.getDevices().filter(d => d.state === 'device');
       if (onlineDevices.length === 0) {
@@ -325,6 +325,12 @@ const App: React.FC = () => {
                     return adbService.current!.uninstall(device.serial, args.packageName);
                  }
                  return Promise.resolve();
+            case 'install':
+                if (args?.packageNameOrPath) {
+                    actionVerb = `Installing ${args.packageNameOrPath} on`;
+                    return adbService.current!.install(device.serial, args.packageNameOrPath);
+                }
+                return Promise.resolve();
             default:
                 return Promise.resolve();
         }
@@ -432,7 +438,7 @@ const App: React.FC = () => {
             onSendCommand={runCommandOnFleet}
             isFleetLoading={isFleetLoading}
             error={error}
-            onInstallApk={(appName) => runAdbCommandOnFleet('uninstall', { appName: `install ${appName}` })}
+            onInstallApk={(packageNameOrPath) => runAdbCommandOnFleet('install', { packageNameOrPath })}
             onAdbReboot={() => runAdbCommandOnFleet('reboot')}
             onAdbToggleLayoutBounds={() => runAdbCommandOnFleet('layout_bounds')}
             onAdbForceStop={(appName) => runAdbCommandOnFleet('force_stop', { appName })}

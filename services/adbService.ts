@@ -302,6 +302,21 @@ export class AdbService {
       }
   }
 
+  public install = async (serial: string, packageNameOrPath: string): Promise<void> => {
+      const device = await this.getAdbDevice(serial);
+      // This is a simplified installation method. A complete implementation
+      // for a developer tool would first require `adb push` to transfer the
+      // local APK file to the device's temporary storage (e.g., /data/local/tmp/).
+      // Since this browser-based environment does not have access to the
+      // user's local file system to push from, this function only executes
+      // the `pm install` command. The user must ensure the APK is already
+      // present on the device at the specified `packageNameOrPath`.
+      const result = await device.exec(`pm install -r ${packageNameOrPath}`);
+      if (result.includes('Failure')) {
+          throw new Error(`Failed to install ${packageNameOrPath}: ${result}`);
+      }
+  }
+
   public forceStop = async (serial: string, appName: string): Promise<void> => {
       const device = await this.getAdbDevice(serial);
       await device.exec(`am force-stop ${appName}`);
