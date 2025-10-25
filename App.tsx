@@ -1,7 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { DeviceFrame } from './components/DeviceFrame';
-import { Message, Device, ScanProgress } from './types';
-import { generateScreenFromCommand } from './services/geminiService';
+import { Device, ScanProgress } from './types';
 import { Header } from './components/Header';
 import { ComputerDesktopIcon } from './components/icons';
 import { Sidebar } from './components/Sidebar';
@@ -12,7 +11,6 @@ import { ScanModal } from './components/ScanModal';
 
 const App: React.FC = () => {
   const [devices, setDevices] = useState<Device[]>([]);
-  const [messages, setMessages] = useState<Message[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isInfoModalOpen, setIsInfoModalOpen] = useState(false);
   const [isAddDeviceModalOpen, setIsAddDeviceModalOpen] = useState(false);
@@ -34,15 +32,6 @@ const App: React.FC = () => {
         setIsScanModalOpen(false);
         setIsInitialScanRunning(false);
         setScanProgress(null);
-
-        const onlineCount = adbService.current?.getDevices().filter(d => d.state === 'device').length ?? 0;
-        const totalCount = adbService.current?.getDevices().length ?? 0;
-        
-        setMessages(prev => [...prev, {
-            role: 'assistant',
-            content: `Scan complete. Found ${totalCount} device(s), ${onlineCount} online.`
-        }]);
-
     }, 1000);
   }, []);
 
@@ -53,7 +42,6 @@ const App: React.FC = () => {
   const errorHandler = useCallback((err: Error) => {
       const errorMessage = err.message.includes("Failed to fetch") ? "Connection failed. Ensure the device is online and network ADB is enabled." : err.message;
       setError(errorMessage);
-      setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${errorMessage}` }]);
   }, []);
 
 
@@ -101,7 +89,7 @@ const App: React.FC = () => {
   }, [isAdbInitialized]);
 
 
-  // Effect to generate initial screens for newly connected devices
+  // Effect to set a placeholder for newly connected devices
   useEffect(() => {
     if (!isAdbInitialized || !adbService.current) return;
     const currentAdbService = adbService.current;
@@ -109,41 +97,20 @@ const App: React.FC = () => {
     const newDevices = devices.filter(d => d.state === 'device' && !d.screenImageUrl && !d.isLoading);
 
     if (newDevices.length > 0) {
-        const generateScreensForNewDevices = async () => {
-            currentAdbService.updateDevices(prev => 
-                prev.map(d => newDevices.some(nd => nd.serial === d.serial) ? { ...d, isLoading: true } : d)
-            );
-
-            const screenPromises = newDevices.map(device => 
-                generateScreenFromCommand(`Show the initial home screen for a ${device.model}`, `the home screen of a modern android device.`)
-                    .then(result => ({ serial: device.serial, model: device.model, ...result }))
-                    .catch(err => ({ serial: device.serial, model: device.model, error: err.message }))
-            );
-
-            const screenResults = await Promise.allSettled(screenPromises);
-
-            currentAdbService.updateDevices(prevDevices => prevDevices.map(device => {
-                const result = screenResults.find(r => r.status === 'fulfilled' && r.value.serial === device.serial);
-                if (result && result.status === 'fulfilled') {
-                    const value = result.value;
-                    if ('error' in value) {
-                         return { ...device, isLoading: false, state: 'offline' }; // Failed to generate screen
-                    }
+        currentAdbService.updateDevices(prev =>
+            prev.map(d => {
+                if (newDevices.some(nd => nd.serial === d.serial)) {
                     return {
-                        ...device,
-                        screenImageUrl: value.imageUrl,
-                        currentScreenDescription: `a screen on a ${value.model} showing ${value.description}`,
-                        isLoading: false,
+                        ...d,
+                        // Set a generic placeholder image
+                        screenImageUrl: 'https://storage.googleapis.com/tango-public-assets/android-homescreen-placeholder.png',
+                        currentScreenDescription: `The home screen of a ${d.model}.`,
+                        isLoading: false
                     };
                 }
-                // If screen generation failed for a new device, just stop loading
-                if (newDevices.some(nd => nd.serial === device.serial)) {
-                    return { ...device, isLoading: false };
-                }
-                return device;
-            }));
-        };
-        generateScreensForNewDevices();
+                return d;
+            })
+        );
     }
   }, [devices, isAdbInitialized]);
   
@@ -151,14 +118,11 @@ const App: React.FC = () => {
     if (!adbService.current) return;
     setIsAddDeviceModalOpen(false);
     setError(null);
-    setMessages(prev => [...prev, { role: 'assistant', content: `Attempting to connect to device at ${ipAddress}...` }]);
     try {
       await adbService.current.connectDevice(ipAddress);
-      setMessages(prev => [...prev, { role: 'assistant', content: `Successfully initiated connection to ${ipAddress}. Please authorize it on the device if prompted.` }]);
     } catch (err) {
        const errorMessage = err instanceof Error ? err.message : 'Unknown error.';
        setError(errorMessage);
-       setMessages(prev => [...prev, { role: 'assistant', content: `Failed to connect to ${ipAddress}: ${errorMessage}` }]);
     }
   }, []);
   
@@ -172,65 +136,10 @@ const App: React.FC = () => {
   const handleEndSession = useCallback(() => {
     if (!adbService.current) return;
     adbService.current.disconnectAll();
-    setMessages([]);
     setError(null);
     setDevices([]);
   }, []);
   
-  const runCommandOnFleet = useCallback(async (command: string, updateDescription: string) => {
-    if (!adbService.current) return;
-    const onlineDevices = adbService.current.getDevices().filter(d => d.state === 'device');
-    if (onlineDevices.length === 0) {
-      setError("No online devices to run command on.");
-      return;
-    }
-
-    setError(null);
-    setMessages(prev => [...prev, { role: 'user', content: command }]);
-    
-    adbService.current.updateDevices(prev => prev.map(d => onlineDevices.some(od => od.serial === d.serial) ? { ...d, isLoading: true } : d));
-
-    const commandPromises = onlineDevices.map(device => 
-      generateScreenFromCommand(command, device.currentScreenDescription)
-        .then(result => ({ ...result, serial: device.serial, model: device.model }))
-    );
-    
-    const results = await Promise.allSettled(commandPromises);
-
-    let firstSuccessDescription = '';
-    let successCount = 0;
-    const failures: { name: string; reason: string }[] = [];
-
-    results.forEach((result, index) => {
-        const device = onlineDevices[index];
-        if (result.status === 'fulfilled') {
-            if (!firstSuccessDescription) {
-                firstSuccessDescription = result.value.description;
-            }
-            successCount++;
-            adbService.current!.updateDevice(device.serial, {
-                screenImageUrl: result.value.imageUrl,
-                currentScreenDescription: `a screen on a ${result.value.model} showing ${result.value.description}`,
-                isLoading: false
-            });
-        } else {
-            failures.push({ name: device.name, reason: result.reason.message });
-            adbService.current!.updateDevice(device.serial, { isLoading: false }); // Stop loading on failure
-        }
-    });
-
-    let summaryMessage = '';
-    if (successCount > 0) {
-      summaryMessage += `${firstSuccessDescription} on ${successCount} device(s).`;
-    }
-    if (failures.length > 0) {
-      const failureText = failures.map(f => `${f.name} (${f.reason})`).join(', ');
-      summaryMessage += `\n\nFailed on ${failures.length} device(s): ${failureText}`;
-    }
-
-    setMessages(prev => [...prev, { role: 'assistant', content: summaryMessage.trim() }]);
-
-  }, []);
   
   const runAdbCommandOnDevice = useCallback(async (cmd: string, serial: string, args?: { appName?: string, packageName?: string }) => {
      if (!adbService.current) return;
@@ -274,11 +183,11 @@ const App: React.FC = () => {
                 break;
         }
         
-        const finalDescription = `Based on the last action (${updateDescription}), generate a new screen.`;
-        const { imageUrl, description } = await generateScreenFromCommand(finalDescription, device.currentScreenDescription);
+        // After an action, just reset to a generic placeholder.
+        // A more sophisticated approach might try to guess the resulting screen.
         adbService.current.updateDevice(serial, {
-            screenImageUrl: imageUrl,
-            currentScreenDescription: `a screen showing the result of: ${description}`,
+            screenImageUrl: 'https://storage.googleapis.com/tango-public-assets/android-homescreen-placeholder.png',
+            currentScreenDescription: `The screen of a ${device.model} after performing an action.`,
             isLoading: false
         });
 
@@ -336,33 +245,15 @@ const App: React.FC = () => {
         }
       });
 
-      const results = await Promise.allSettled(adbPromises);
+      await Promise.allSettled(adbPromises);
 
-      // Now generate new screens based on the results
-      const screenPromises = onlineDevices.map((device, index) => {
-          if (results[index].status === 'fulfilled') {
-              const commandDescription = `${actionVerb} ${device.name}`;
-              return generateScreenFromCommand(commandDescription, device.currentScreenDescription)
-                  .then(res => ({ ...res, serial: device.serial, model: device.model, success: true }))
-                  .catch(err => ({ serial: device.serial, model: device.model, success: false, reason: err.message }));
-          } else {
-              return Promise.resolve({ serial: device.serial, model: device.model, success: false, reason: (results[index] as PromiseRejectedResult).reason.message });
-          }
-      });
-      
-      const screenResults = await Promise.all(screenPromises);
-
-      screenResults.forEach(res => {
-          if (res.success) {
-            adbService.current!.updateDevice(res.serial, {
-              isLoading: false,
-              screenImageUrl: res.imageUrl,
-              currentScreenDescription: `a screen on ${res.model} showing ${res.description}`
-            });
-          } else {
-             adbService.current!.updateDevice(res.serial, { isLoading: false });
-             setError(`Failed on ${res.model}: ${res.reason}`);
-          }
+      // After the commands, update all devices to a generic state.
+      onlineDevices.forEach(device => {
+        adbService.current!.updateDevice(device.serial, {
+            isLoading: false,
+            screenImageUrl: 'https://storage.googleapis.com/tango-public-assets/android-homescreen-placeholder.png',
+            currentScreenDescription: `The screen of a ${device.model} after performing a fleet action.`
+        });
       });
   }, []);
   
@@ -434,8 +325,6 @@ const App: React.FC = () => {
         </div>
         <aside className="w-[400px] flex-shrink-0">
           <Sidebar 
-            messages={messages}
-            onSendCommand={runCommandOnFleet}
             isFleetLoading={isFleetLoading}
             error={error}
             onInstallApk={(packageNameOrPath) => runAdbCommandOnFleet('install', { packageNameOrPath })}
