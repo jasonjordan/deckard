@@ -9,9 +9,9 @@ This tool was built to streamline the process of managing multiple Android devic
 Key features include:
 *   **Network Discovery:** Automatically scan your local network to find and connect to ADB-enabled devices.
 *   **Manual Connection:** Connect to devices directly via their IP address.
-*   **Fleet Command Execution:** Run common ADB commands (reboot, force-stop, etc.) across all connected devices at once from a central control panel.
-*   **Device Screen Placeholder:** View a static placeholder image for each device's screen to confirm its connection status.
-*   **Mass APK Installation:** Install an APK on all connected devices by providing its full on-device path.
+*   **Fleet Command Execution:** Use a natural language chat interface to generate and run commands on all online devices.
+*   **Real-time Screen Simulation:** See a generated representation of each device's screen, which updates in response to your commands.
+*   **Mass APK Installation:** Install an APK on all connected devices by providing its path on the device.
 *   **Standard ADB Actions:** Perform common ADB tasks like rebooting, force-stopping applications, toggling layout bounds, and uninstalling packages on the entire fleet.
 
 ### Built With
@@ -56,8 +56,9 @@ Once the application is running, you can start managing your devices.
     *   Use the **"Add Device"** button to connect to a device manually by entering its IP address and port.
 
 2.  **Interact with the Fleet:**
-    *   **Install APK:** From the "Install" tab, provide the full path to an APK file that is already on the devices (e.g., `/sdcard/Download/app.apk`), and click the install button to deploy it to the entire fleet.
-    *   **ADB Panel:** Switch to the "ADB" tab to access buttons for common fleet-wide commands like rebooting all devices, uninstalling a package by name, or toggling layout bounds for UI debugging.
+    *   **Chat:** Use the chat input on the right-hand sidebar to issue commands in natural language (e.g., "Open the settings app"). The command will be interpreted and run on all online devices.
+    *   **Install APK:** Switch to the "Install" tab, provide the full path to an APK file that is already on the devices (e.g., `/sdcard/Download/app.apk`), and click the install button.
+    *   **ADB Panel:** Switch to the "ADB" tab to access buttons for common commands like rebooting the fleet, uninstalling a package by name, or toggling layout bounds for UI debugging.
 
 3.  **End Session:**
     *   Click the **"End Session"** button in the header to disconnect from all devices and clear the dashboard.
