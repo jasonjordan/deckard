@@ -27,8 +27,23 @@ const App: React.FC = () => {
   const isFleetLoading = devices.some(d => d.isLoading);
   
   const scanCompleteHandler = useCallback(() => {
-    setScanProgress(null);
-    setIsInitialScanRunning(false);
+    // Using a timeout provides a better user experience, allowing the user to see the
+    // "100%" state for a moment before the modal closes, and ensures final device
+    // state updates have time to render.
+    setTimeout(() => {
+        setIsScanModalOpen(false);
+        setIsInitialScanRunning(false);
+        setScanProgress(null);
+
+        const onlineCount = adbService.current?.getDevices().filter(d => d.state === 'device').length ?? 0;
+        const totalCount = adbService.current?.getDevices().length ?? 0;
+        
+        setMessages(prev => [...prev, {
+            role: 'assistant',
+            content: `Scan complete. Found ${totalCount} device(s), ${onlineCount} online.`
+        }]);
+
+    }, 1000);
   }, []);
 
   const scanProgressHandler = useCallback((progress: ScanProgress) => {
