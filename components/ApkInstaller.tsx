@@ -2,37 +2,40 @@ import React, { useState } from 'react';
 import { PlusCircleIcon } from './icons';
 
 interface ApkInstallerProps {
-  onInstall: (appName: string) => void;
+  onInstall: (packageNameOrPath: string) => void;
   isLoading: boolean;
 }
 
 export const ApkInstaller: React.FC<ApkInstallerProps> = ({ onInstall, isLoading }) => {
-  const [appName, setAppName] = useState('');
+  const [packageNameOrPath, setPackageNameOrPath] = useState('');
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (appName.trim() && !isLoading) {
-      onInstall(appName);
-      setAppName('');
+    if (packageNameOrPath.trim() && !isLoading) {
+      onInstall(packageNameOrPath);
+      setPackageNameOrPath('');
     }
   };
 
   return (
     <div className="bg-slate-800 border border-slate-700 rounded-2xl p-4 shadow-lg flex-shrink-0">
        <h3 className="text-md font-semibold text-center mb-1">Mass Install APK</h3>
-       <p className="text-xs text-slate-400 text-center mb-3">Simulate installing an application on all devices.</p>
+       <p className="text-xs text-slate-400 text-center mb-3">
+        Enter the full path to an APK file already on the device.
+        (e.g., <code className="bg-slate-900 px-1 rounded">/sdcard/Download/app.apk</code>)
+       </p>
       <form onSubmit={handleSubmit} className="flex items-center gap-2">
         <input
           type="text"
-          value={appName}
-          onChange={(e) => setAppName(e.target.value)}
-          placeholder={isLoading ? "Installing on all devices..." : "e.g., Netflix"}
+          value={packageNameOrPath}
+          onChange={(e) => setPackageNameOrPath(e.target.value)}
+          placeholder={isLoading ? "Installing..." : "Full path to APK on device"}
           disabled={isLoading}
           className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 transition disabled:opacity-50"
         />
         <button
           type="submit"
-          disabled={isLoading || !appName.trim()}
+          disabled={isLoading || !packageNameOrPath.trim()}
           className="p-2 w-9 h-9 flex-shrink-0 flex items-center justify-center bg-indigo-600 rounded-lg hover:bg-indigo-500 disabled:bg-slate-600 disabled:cursor-not-allowed transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-800 focus:ring-indigo-500"
           title="Install App"
         >
