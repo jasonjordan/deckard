@@ -16,3 +16,9 @@ export interface Device {
   layoutBoundsVisible: boolean;
   infoOverlay: string | null;
 }
+
+export interface ScanProgress {
+  currentIp: string;
+  progress: number; // 0-100
+  found: number;
+}

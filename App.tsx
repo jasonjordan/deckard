@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { DeviceFrame } from './components/DeviceFrame';
-import { Message, Device } from './types';
+import { Message, Device, ScanProgress } from './types';
 import { generateScreenFromCommand } from './services/geminiService';
 import { Header } from './components/Header';
 import { ComputerDesktopIcon } from './components/icons';
@@ -8,6 +8,7 @@ import { Sidebar } from './components/Sidebar';
 import { InfoModal } from './components/InfoModal';
 import { AdbService } from './services/adbService';
 import { AddDeviceModal } from './components/AddDeviceModal';
+import { ScanModal } from './components/ScanModal';
 
 const App: React.FC = () => {
   const [devices, setDevices] = useState<Device[]>([]);
@@ -15,6 +16,8 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [isInfoModalOpen, setIsInfoModalOpen] = useState(false);
   const [isAddDeviceModalOpen, setIsAddDeviceModalOpen] = useState(false);
+  const [isScanModalOpen, setIsScanModalOpen] = useState(false);
+  const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
   const [deviceInfoContent, setDeviceInfoContent] = useState('');
   
   const adbService = useRef<AdbService | null>(null);
@@ -29,6 +32,10 @@ const App: React.FC = () => {
         setError(errorMessage);
         setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${errorMessage}` }]);
     };
+    
+    const scanProgressHandler = (progress: ScanProgress) => setScanProgress(progress);
+    const scanCompleteHandler = () => setScanProgress(null);
+
 
     const initAdbService = () => {
       if (window.Tango?.Adb) {
@@ -38,6 +45,8 @@ const App: React.FC = () => {
         // Set up listeners
         service.on('devices-update', setDevices);
         service.on('error', errorHandler);
+        service.on('scan-progress', scanProgressHandler);
+        service.on('scan-complete', scanCompleteHandler);
         
         setIsAdbInitialized(true);
       } else {
@@ -53,6 +62,8 @@ const App: React.FC = () => {
       if (adbService.current) {
         adbService.current.off('devices-update', setDevices);
         adbService.current.off('error', errorHandler);
+        adbService.current.off('scan-progress', scanProgressHandler);
+        adbService.current.off('scan-complete', scanCompleteHandler);
         adbService.current.disconnectAll();
       }
     };
@@ -119,291 +130,278 @@ const App: React.FC = () => {
        setMessages(prev => [...prev, { role: 'assistant', content: `Failed to connect to ${ipAddress}: ${errorMessage}` }]);
     }
   }, []);
+  
+  const handleScanNetwork = useCallback(async () => {
+    if (!adbService.current) return;
+    // Ensure modal is open if called from header, but don't re-open if scan is starting from inside modal
+    if (!isScanModalOpen) {
+      setIsScanModalOpen(true);
+    }
+    await adbService.current.scanNetwork();
+  }, [isScanModalOpen]);
 
   const handleEndSession = useCallback(() => {
     if (!adbService.current) return;
     adbService.current.disconnectAll();
     setMessages([]);
     setError(null);
+    setDevices([]);
   }, []);
-
-  const runCommandOnFleet = useCallback(async (command: string, userMessage: string) => {
+  
+  const runCommandOnFleet = useCallback(async (command: string, updateDescription: string) => {
     if (!adbService.current) return;
-    const currentAdbService = adbService.current;
-    
-    const newUserMessage: Message = { role: 'user', content: userMessage };
-    setMessages(prev => [...prev, newUserMessage]);
-    setError(null);
-
-    const targetDevices = currentAdbService.getDevices().filter(d => d.state === 'device');
-
-    if (targetDevices.length === 0) {
-      const noDevicesMessage: Message = { role: 'assistant', content: "No online devices to run the command on." };
-      setMessages(prev => [...prev, noDevicesMessage]);
+    const onlineDevices = adbService.current.getDevices().filter(d => d.state === 'device');
+    if (onlineDevices.length === 0) {
+      setError("No online devices to run command on.");
       return;
-    };
+    }
+
+    setError(null);
+    setMessages(prev => [...prev, { role: 'user', content: command }]);
     
-    currentAdbService.updateDevices(prev => prev.map(d => targetDevices.some(td => td.serial === d.serial) ? { ...d, isLoading: true } : d));
+    adbService.current.updateDevices(prev => prev.map(d => onlineDevices.some(od => od.serial === d.serial) ? { ...d, isLoading: true } : d));
 
-    try {
-      const commandPromises = targetDevices.map(device => 
-        generateScreenFromCommand(command, device.currentScreenDescription)
-            .then(result => ({ serial: device.serial, ...result }))
-      );
-      
-      const settledResults = await Promise.allSettled(commandPromises);
-      
-      const successfulResults: (Awaited<ReturnType<typeof generateScreenFromCommand>> & { serial: string })[] = [];
-      const failedDevices: { name: string; reason: string; }[] = [];
+    const commandPromises = onlineDevices.map(device => 
+      generateScreenFromCommand(command, device.currentScreenDescription)
+        .then(result => ({ ...result, serial: device.serial, model: device.model }))
+    );
+    
+    const results = await Promise.allSettled(commandPromises);
 
-      settledResults.forEach((result, index) => {
-        const device = targetDevices[index];
+    let firstSuccessDescription = '';
+    let successCount = 0;
+    const failures: { name: string; reason: string }[] = [];
+
+    results.forEach((result, index) => {
+        const device = onlineDevices[index];
         if (result.status === 'fulfilled') {
-          successfulResults.push(result.value);
+            if (!firstSuccessDescription) {
+                firstSuccessDescription = result.value.description;
+            }
+            successCount++;
+            adbService.current!.updateDevice(device.serial, {
+                screenImageUrl: result.value.imageUrl,
+                currentScreenDescription: `a screen on a ${result.value.model} showing ${result.value.description}`,
+                isLoading: false
+            });
         } else {
-          failedDevices.push({
-            name: device.name,
-            reason: result.reason instanceof Error ? result.reason.message : 'Unknown error'
-          });
+            failures.push({ name: device.name, reason: result.reason.message });
+            adbService.current!.updateDevice(device.serial, { isLoading: false }); // Stop loading on failure
+        }
+    });
+
+    let summaryMessage = '';
+    if (successCount > 0) {
+      summaryMessage += `${firstSuccessDescription} on ${successCount} device(s).`;
+    }
+    if (failures.length > 0) {
+      const failureText = failures.map(f => `${f.name} (${f.reason})`).join(', ');
+      summaryMessage += `\n\nFailed on ${failures.length} device(s): ${failureText}`;
+    }
+
+    setMessages(prev => [...prev, { role: 'assistant', content: summaryMessage.trim() }]);
+
+  }, []);
+  
+  const runAdbCommandOnDevice = useCallback(async (cmd: string, serial: string, args?: { appName?: string, packageName?: string }) => {
+     if (!adbService.current) return;
+     const device = devices.find(d => d.serial === serial);
+     if (!device) return;
+
+     setError(null);
+     adbService.current.updateDevice(serial, { isLoading: true });
+
+     try {
+        let updateDescription = '';
+        switch(cmd) {
+            case 'reboot':
+                await adbService.current.reboot(serial);
+                updateDescription = `Device ${device.name} is rebooting.`;
+                break;
+            case 'layout_bounds':
+                 const nextLayoutState = !device.layoutBoundsVisible;
+                 await adbService.current.exec(serial, `setprop debug.layout ${nextLayoutState}`);
+                 await adbService.current.exec(serial, 'service call window 3'); // This forces a redraw
+                 adbService.current.updateDevice(serial, { layoutBoundsVisible: nextLayoutState });
+                 updateDescription = `Toggled layout bounds ${nextLayoutState ? 'on' : 'off'} for ${device.name}.`;
+                 break;
+            case 'get_properties':
+                const props = await adbService.current.getProperties(serial);
+                const propsString = Object.entries(props).map(([key, value]) => `[${key}]: [${value}]`).join('\n');
+                adbService.current.updateDevice(serial, { infoOverlay: propsString });
+                // Set a timer to clear the overlay
+                setTimeout(() => adbService.current!.updateDevice(serial, { infoOverlay: null }), 15000);
+                updateDescription = `Fetched properties for ${device.name}.`;
+                break;
+            case 'force_stop':
+                if (args?.appName) {
+                    await adbService.current.forceStop(serial, args.appName);
+                    updateDescription = `Force stopped ${args.appName} on ${device.name}. The device will now show the home screen.`;
+                }
+                break;
+             case 'disconnect':
+                await adbService.current.disconnectDevice(serial);
+                updateDescription = `Disconnected from ${device.name}.`;
+                break;
+        }
+        
+        const finalDescription = `Based on the last action (${updateDescription}), generate a new screen.`;
+        const { imageUrl, description } = await generateScreenFromCommand(finalDescription, device.currentScreenDescription);
+        adbService.current.updateDevice(serial, {
+            screenImageUrl: imageUrl,
+            currentScreenDescription: `a screen showing the result of: ${description}`,
+            isLoading: false
+        });
+
+     } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : 'Unknown ADB error';
+        setError(`Failed on ${device.name}: ${errorMessage}`);
+        adbService.current.updateDevice(serial, { isLoading: false });
+     }
+  }, [devices]);
+
+  const runAdbCommandOnFleet = useCallback(async (command: string, args?: { appName?: string, packageName?: string }) => {
+      if (!adbService.current) return;
+      const onlineDevices = adbService.current.getDevices().filter(d => d.state === 'device');
+      if (onlineDevices.length === 0) {
+        setError("No online devices to run command on.");
+        return;
+      }
+      
+      setError(null);
+      let actionVerb = '';
+
+      // Set loading state for all targeted devices
+      adbService.current.updateDevices(prev => prev.map(d => onlineDevices.some(od => od.serial === d.serial) ? { ...d, isLoading: true } : d));
+
+      const adbPromises = onlineDevices.map(device => {
+        switch (command) {
+            case 'reboot':
+                actionVerb = 'Rebooting';
+                return adbService.current!.reboot(device.serial);
+            case 'layout_bounds':
+                actionVerb = 'Toggling layout bounds on';
+                const nextState = !device.layoutBoundsVisible;
+                adbService.current!.updateDevice(device.serial, { layoutBoundsVisible: nextState });
+                return adbService.current!.exec(device.serial, `setprop debug.layout ${nextState}`).then(() => adbService.current!.exec(device.serial, 'service call window 3'));
+            case 'force_stop':
+                if (args?.appName) {
+                    actionVerb = `Forcing stop of ${args.appName} on`;
+                    return adbService.current!.forceStop(device.serial, args.appName);
+                }
+                return Promise.resolve();
+            case 'uninstall':
+                 if (args?.packageName) {
+                    actionVerb = `Uninstalling ${args.packageName} from`;
+                    return adbService.current!.uninstall(device.serial, args.packageName);
+                 }
+                 return Promise.resolve();
+            default:
+                return Promise.resolve();
         }
       });
+
+      const results = await Promise.allSettled(adbPromises);
+
+      // Now generate new screens based on the results
+      const screenPromises = onlineDevices.map((device, index) => {
+          if (results[index].status === 'fulfilled') {
+              const commandDescription = `${actionVerb} ${device.name}`;
+              return generateScreenFromCommand(commandDescription, device.currentScreenDescription)
+                  .then(res => ({ ...res, serial: device.serial, model: device.model, success: true }))
+                  .catch(err => ({ serial: device.serial, model: device.model, success: false, reason: err.message }));
+          } else {
+              return Promise.resolve({ serial: device.serial, model: device.model, success: false, reason: (results[index] as PromiseRejectedResult).reason.message });
+          }
+      });
       
-      currentAdbService.updateDevices(prevDevices => prevDevices.map(device => {
-        const successfulResult = successfulResults.find(r => r.serial === device.serial);
-        if (successfulResult) {
-            return {
-                ...device,
-                screenImageUrl: successfulResult.imageUrl,
-                currentScreenDescription: `a screen on a ${device.model} showing ${successfulResult.description}`,
-                isLoading: false,
-            };
-        }
-        if (targetDevices.some(td => td.serial === device.serial)) {
-            return { ...device, isLoading: false };
-        }
-        return device;
-      }));
-      
-      let summaryMessage = '';
-      const total = targetDevices.length;
-      if (failedDevices.length === 0 && successfulResults.length > 0) {
-        summaryMessage = `${successfulResults[0].description} (Applied to ${total} device${total > 1 ? 's' : ''}).`;
-      } else {
-        summaryMessage = `Command executed with mixed results.\n\n`;
-        if (successfulResults.length > 0) {
-          const successNames = targetDevices.filter(d => successfulResults.some(r => r.serial === d.serial)).map(d => d.name).join(', ');
-          summaryMessage += `✅ **Success (${successfulResults.length}):** ${successNames}\n`;
-        }
-        if (failedDevices.length > 0) {
-          const failureInfo = failedDevices.map(f => f.name).join(', ');
-          summaryMessage += `❌ **Failed (${failedDevices.length}):** ${failureInfo}`;
-        }
-      }
-      const newAssistantMessage: Message = { role: 'assistant', content: summaryMessage.trim() };
-      setMessages(prev => [...prev, newAssistantMessage]);
+      const screenResults = await Promise.all(screenPromises);
 
-    } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
-        setError(`A critical error occurred. ${errorMessage}`);
-        console.error(err);
-        currentAdbService.updateDevices(prev => prev.map(d => ({ ...d, isLoading: false })));
-    }
-  }, []);
-
-  const handleSendCommand = useCallback((command: string) => {
-      if (!command.trim()) return;
-      runCommandOnFleet(command, command);
-  }, [runCommandOnFleet]);
-
-  const handleInstallApk = useCallback((appName: string) => {
-    if(!appName.trim()) return;
-    const command = `Install the app "${appName}" and show its icon on the home screen.`;
-    const userMessage = `Install ${appName}.apk`;
-    runCommandOnFleet(command, userMessage);
-  }, [runCommandOnFleet]);
-
-  // --- ADB Command Handlers ---
-
-  const handleAdbCommand = async (handler: (serial: string, args?: any) => Promise<any>, serials: string[], args?: any) => {
-    if (!adbService.current) return;
-    try {
-        await Promise.all(serials.map(serial => handler(serial, args)));
-    } catch(err) {
-        const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
-        setError(`ADB command failed: ${errorMessage}`);
-    }
-  };
-  
-  const handleDisconnectDevice = (serial: string) => {
-    if (!adbService.current) return;
-    adbService.current.disconnectDevice(serial);
-  };
-
-  const handleReboot = useCallback((serials: string[]) => {
-    if (!adbService.current) return;
-    handleAdbCommand(adbService.current.reboot, serials);
-  }, []);
-
-  const handleToggleLayoutBounds = useCallback(async (serials: string[]) => {
-    if (!adbService.current) return;
-    const currentAdbService = adbService.current;
-
-    const targetDevices = currentAdbService.getDevices().filter(d => serials.includes(d.serial) && d.state === 'device');
-    if (targetDevices.length === 0) return;
-    
-    currentAdbService.updateDevices(prev => prev.map(d => targetDevices.some(td => td.serial === d.serial) ? { ...d, isLoading: true } : d));
-
-    try {
-        const commandPromises = targetDevices.map(async device => {
-            const newLayoutBoundsState = !device.layoutBoundsVisible;
-            // Execute real ADB command
-            await currentAdbService.setLayoutBounds(device.serial, newLayoutBoundsState);
-
-            // Generate visual update
-            const command = newLayoutBoundsState
-                ? `Redraw the current screen described as "${device.currentScreenDescription}" but with developer layout bounds enabled, showing thin red and blue outlines on all UI elements.`
-                : `Redraw the current screen described as "${device.currentScreenDescription}" but with developer layout bounds disabled, returning to the normal appearance.`;
-
-            const result = await generateScreenFromCommand(command, device.currentScreenDescription);
-            return { serial: device.serial, ...result, layoutBoundsVisible: newLayoutBoundsState };
-        });
-        
-        const results = await Promise.all(commandPromises);
-
-        currentAdbService.updateDevices(prevDevices => prevDevices.map(device => {
-            const result = results.find(r => r.serial === device.serial);
-            return result ? {
-                ...device,
-                screenImageUrl: result.imageUrl,
-                currentScreenDescription: `a screen on a ${device.model} showing ${result.description}`,
-                isLoading: false,
-                layoutBoundsVisible: result.layoutBoundsVisible,
-            } : { ...device, isLoading: false };
-        }));
-    } catch (err) {
-      console.error(err);
-      setError('Failed to toggle layout bounds.');
-      currentAdbService.updateDevices(prev => prev.map(d => ({ ...d, isLoading: false })));
-    }
-  }, []);
-
-  const handleGetProperties = useCallback(async (serial: string) => {
-    if (!adbService.current) return;
-    const currentAdbService = adbService.current;
-    try {
-        const props = await currentAdbService.getProperties(serial);
-        const propsString = Object.entries(props).map(([key, value]) => `${key}: ${value}`).join('\n');
-        currentAdbService.updateDevice(serial, { infoOverlay: propsString });
-        setTimeout(() => {
-            currentAdbService.updateDevice(serial, { infoOverlay: null });
-        }, 5000);
-    } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred.';
-        setError(`Failed to get properties: ${errorMessage}`);
-    }
+      screenResults.forEach(res => {
+          if (res.success) {
+            adbService.current!.updateDevice(res.serial, {
+              isLoading: false,
+              screenImageUrl: res.imageUrl,
+              currentScreenDescription: `a screen on ${res.model} showing ${res.description}`
+            });
+          } else {
+             adbService.current!.updateDevice(res.serial, { isLoading: false });
+             setError(`Failed on ${res.model}: ${res.reason}`);
+          }
+      });
   }, []);
   
-  const handleForceStop = useCallback(async (appName: string, serials: string[]) => {
-    if (!adbService.current || !appName.trim()) return;
-    await handleAdbCommand(adbService.current.forceStop, serials, appName);
-    const homeScreenCommand = `Show the device's main home screen.`;
-    const userMessage = `ADB Command: Force Stop ${appName}`;
-    // Visually update the screen using Gemini
-    const targetDevices = adbService.current.getDevices().filter(d => serials.includes(d.serial) && d.state === 'device');
-    if (targetDevices.length > 0) {
-        runCommandOnFleet(homeScreenCommand, userMessage);
-    }
-  }, [runCommandOnFleet]);
-
-  const handleUninstall = useCallback(async (packageName: string, serials: string[]) => {
-    if (!adbService.current || !packageName.trim()) return;
-    await handleAdbCommand(adbService.current.uninstall, serials, packageName);
-    const homeScreenCommand = `Uninstall the app with package name "${packageName}". The app icon should be removed, and the device should show its main home screen.`;
-    const userMessage = `ADB Command: Uninstall ${packageName}`;
-     // Visually update the screen using Gemini
-     const targetDevices = adbService.current.getDevices().filter(d => serials.includes(d.serial) && d.state === 'device');
-     if (targetDevices.length > 0) {
-         runCommandOnFleet(homeScreenCommand, userMessage);
-     }
-  }, [runCommandOnFleet]);
-
   const handleGetFleetInfo = useCallback(async () => {
     if (!adbService.current) return;
     const onlineDevices = adbService.current.getDevices().filter(d => d.state === 'device');
     if (onlineDevices.length === 0) {
-      setDeviceInfoContent("No online devices to get information from.");
+      setDeviceInfoContent("No online devices to fetch information from.");
       setIsInfoModalOpen(true);
       return;
     }
-
-    const allPropsPromises = onlineDevices.map(async device => {
-        try {
-            if (!adbService.current) throw new Error("ADB service disconnected");
-            const props = await adbService.current.getProperties(device.serial);
-            return `--- ${props['ro.product.manufacturer']} ${props['ro.product.model']} (${device.serial}) ---\n` +
-                   `Android Version: ${props['ro.build.version.release']}\n` +
-                   `Build: ${props['ro.build.display.id']}`;
-        } catch (e) {
-            return `--- ${device.name} (${device.serial}) ---\nCould not fetch properties.`;
-        }
-    });
-
-    const allProps = (await Promise.all(allPropsPromises)).join('\n\n');
-
-    setDeviceInfoContent(allProps);
+    
+    setDeviceInfoContent("Fetching information from all online devices...");
     setIsInfoModalOpen(true);
+
+    const infoPromises = onlineDevices.map(d => adbService.current!.getProperties(d.serial));
+    const results = await Promise.allSettled(infoPromises);
+
+    const content = results.map((result, index) => {
+        const device = onlineDevices[index];
+        if (result.status === 'fulfilled') {
+            const props = result.value;
+            return `--- ${device.name} (${device.ipAddress}) ---\n` +
+                   `Model: ${props['ro.product.model'] || 'N/A'}\n` +
+                   `Manufacturer: ${props['ro.product.manufacturer'] || 'N/A'}\n` +
+                   `Android Version: ${props['ro.build.version.release'] || 'N/A'}\n` +
+                   `Build: ${props['ro.build.id'] || 'N/A'}\n` +
+                   `-----------------------------------\n`;
+        } else {
+            return `--- FAILED: ${device.name} (${device.ipAddress}) ---\n` +
+                   `Reason: ${result.reason.message}\n` +
+                   `-----------------------------------\n`;
+        }
+    }).join('\n');
+    
+    setDeviceInfoContent(content);
+
   }, []);
-  
-  const getSerialsForFleet = () => adbService.current?.getDevices().filter(d => d.state === 'device').map(d => d.serial) ?? [];
-  
+
+
   return (
-    <div className="min-h-screen max-h-screen bg-slate-900 text-white font-sans flex flex-col">
+    <div className="flex flex-col h-screen text-white font-sans">
       <Header 
-        deviceCount={devices.length}
+        deviceCount={devices.filter(d => d.state === 'device').length}
         onAddDevice={() => setIsAddDeviceModalOpen(true)}
+        onScanNetwork={() => setIsScanModalOpen(true)}
         onEndSession={handleEndSession}
       />
-      <main className="flex-grow flex flex-col lg:flex-row p-4 gap-4 overflow-hidden h-[calc(100vh-69px)]">
-        <div className="flex-grow bg-slate-900/50 rounded-lg overflow-auto border border-slate-800">
-            {devices.length === 0 ? (
-                <div className="flex-grow h-full flex flex-col items-center justify-center text-center p-8">
-                    <ComputerDesktopIcon className="w-16 h-16 text-indigo-400/50 mb-4" />
-                    <p className="text-xl text-slate-300">No Devices Connected</p>
-                    <p className="text-sm text-slate-400 mt-2">Click "Add Device" in the header to connect to a device via its IP address.</p>
-                </div>
-            ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-x-4 gap-y-8 p-4 justify-items-center">
-                    {devices.map(device => (
-                        <DeviceFrame 
-                            key={device.serial} 
-                            device={device}
-                            onRunAdbCommand={(command, serial, args) => {
-                                switch(command) {
-                                    case 'reboot': handleReboot([serial]); break;
-                                    case 'layout_bounds': handleToggleLayoutBounds([serial]); break;
-                                    case 'get_properties': handleGetProperties(serial); break;
-                                    case 'force_stop': if(args?.appName) handleForceStop(args.appName, [serial]); break;
-                                    case 'disconnect': handleDisconnectDevice(serial); break;
-                                }
-                            }}
-                        />
-                    ))}
-                </div>
-            )}
+      <main className="flex-grow flex p-4 gap-4 overflow-hidden">
+        <div className="flex-grow grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-6 p-4 overflow-y-auto rounded-2xl bg-slate-900/50 border border-slate-700/50">
+          {devices.length === 0 && !isScanModalOpen && (
+            <div className="col-span-full flex flex-col items-center justify-center text-center text-slate-500 h-full">
+              <ComputerDesktopIcon className="w-20 h-20 mb-4" />
+              <h2 className="text-2xl font-bold text-slate-300">No Devices Connected</h2>
+              <p className="mt-2">Use "Scan Network" to automatically find devices, or "Add Device" to connect via IP address.</p>
+            </div>
+          )}
+          {devices.map(device => (
+            <DeviceFrame key={device.serial} device={device} onRunAdbCommand={runAdbCommandOnDevice} />
+          ))}
         </div>
-        <aside className="w-full lg:w-[400px] lg:max-w-md flex-shrink-0 flex flex-col gap-4 h-full">
-           <Sidebar 
-             messages={messages}
-             onSendCommand={handleSendCommand}
-             isFleetLoading={!isAdbInitialized || isFleetLoading}
-             error={error}
-             onInstallApk={handleInstallApk}
-             onAdbReboot={() => handleReboot(getSerialsForFleet())}
-             onAdbToggleLayoutBounds={() => handleToggleLayoutBounds(getSerialsForFleet())}
-             onAdbForceStop={(appName) => handleForceStop(appName, getSerialsForFleet())}
-             onAdbUninstall={(packageName) => handleUninstall(packageName, getSerialsForFleet())}
-             onAdbGetFleetInfo={handleGetFleetInfo}
-           />
+        <aside className="w-[400px] flex-shrink-0">
+          <Sidebar 
+            messages={messages}
+            onSendCommand={runCommandOnFleet}
+            isFleetLoading={isFleetLoading}
+            error={error}
+            onInstallApk={(appName) => runAdbCommandOnFleet('uninstall', { appName: `install ${appName}` })}
+            onAdbReboot={() => runAdbCommandOnFleet('reboot')}
+            onAdbToggleLayoutBounds={() => runAdbCommandOnFleet('layout_bounds')}
+            onAdbForceStop={(appName) => runAdbCommandOnFleet('force_stop', { appName })}
+            onAdbUninstall={(packageName) => runAdbCommandOnFleet('uninstall', { packageName })}
+            onAdbGetFleetInfo={handleGetFleetInfo}
+          />
         </aside>
       </main>
       <InfoModal 
@@ -412,10 +410,20 @@ const App: React.FC = () => {
         title="Fleet Device Information"
         content={deviceInfoContent}
       />
-      <AddDeviceModal
+      <AddDeviceModal 
         isOpen={isAddDeviceModalOpen}
         onClose={() => setIsAddDeviceModalOpen(false)}
         onConnect={handleAddDevice}
+      />
+       <ScanModal 
+        isOpen={isScanModalOpen}
+        onClose={() => {
+            setIsScanModalOpen(false);
+            if (adbService.current) adbService.current.cancelScan();
+        }}
+        onScan={handleScanNetwork}
+        progress={scanProgress}
+        foundDevices={devices}
       />
     </div>
   );
