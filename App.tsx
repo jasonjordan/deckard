@@ -326,6 +326,7 @@ const App: React.FC = () => {
         <aside className="w-[400px] flex-shrink-0">
           <Sidebar 
             isFleetLoading={isFleetLoading}
+            error={error}
             onInstallApk={(packageNameOrPath) => runAdbCommandOnFleet('install', { packageNameOrPath })}
             onAdbReboot={() => runAdbCommandOnFleet('reboot')}
             onAdbToggleLayoutBounds={() => runAdbCommandOnFleet('layout_bounds')}
